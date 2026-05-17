@@ -24,6 +24,9 @@ export const config = {
   feeds: {
     binanceUrl: process.env.BINANCE_API_URL || 'https://api.binance.com/api/v3',
     coinbaseUrl: process.env.COINBASE_API_URL || 'https://api.coinbase.com/v2',
+    coingeckoUrl: process.env.COINGECKO_API_URL || 'https://api.coingecko.com/api/v3',
+    krakenUrl: process.env.KRAKEN_API_URL || 'https://api.kraken.com/0/public',
+    okxUrl: process.env.OKX_API_URL || 'https://www.okx.com/api/v5',
   },
 
   // Strategy

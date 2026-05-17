@@ -111,3 +111,86 @@ export interface BotStatus {
   activeMarkets: number;
   openOrders: number;
 }
+
+// ============================================
+// Historical Trade Data Types
+// ============================================
+
+export interface HistoricalTrade {
+  id: string;
+  marketId: string;
+  tokenId: string;
+  side: 'BUY' | 'SELL';
+  price: number;
+  size: number;
+  timestamp: number;
+  maker: string;
+  taker: string;
+}
+
+export interface PriceCandle {
+  tokenId: string;
+  open: number;
+  high: number;
+  low: number;
+  close: number;
+  volume: number;
+  timestamp: number;     // candle start
+  period: '1m' | '5m' | '15m' | '1h' | '1d';
+}
+
+export interface MarketHistory {
+  marketId: string;
+  trades: HistoricalTrade[];
+  candles: PriceCandle[];
+  vwap: number;                    // volume-weighted average price
+  totalVolume24h: number;
+  tradeCount24h: number;
+  priceChange24h: number;          // percentage
+  highPrice24h: number;
+  lowPrice24h: number;
+  lastUpdated: number;
+}
+
+export interface VolumeProfile {
+  priceLevel: number;
+  volume: number;
+  buyVolume: number;
+  sellVolume: number;
+}
+
+// ============================================
+// Market Resolution Types
+// ============================================
+
+export type ResolutionStatus = 'ACTIVE' | 'PENDING_RESOLUTION' | 'RESOLVED' | 'DISPUTED';
+
+export interface MarketResolution {
+  marketId: string;
+  conditionId: string;
+  question: string;
+  status: ResolutionStatus;
+  resolvedAt?: number;
+  winningOutcome?: string;         // "Yes" or "No"
+  winningTokenId?: string;
+  payoutPerShare?: number;         // typically 1.0 for winner, 0 for loser
+  resolutionSource?: string;
+  lastChecked: number;
+}
+
+export interface ResolutionEvent {
+  marketId: string;
+  previousStatus: ResolutionStatus;
+  newStatus: ResolutionStatus;
+  winningOutcome?: string;
+  timestamp: number;
+  pnlImpact?: number;             // realized P&L from resolution
+}
+
+export interface PositionResolutionResult {
+  marketId: string;
+  position: Position;
+  resolution: MarketResolution;
+  realizedPnl: number;
+  isWinner: boolean;
+}

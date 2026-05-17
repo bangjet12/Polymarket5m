@@ -218,6 +218,74 @@ export class PolymarketClient {
   }
 
   /**
+   * Fetch recent trades for a specific token (for historical analysis)
+   */
+  async fetchTokenTrades(tokenId: string, limit: number = 100): Promise<any[]> {
+    try {
+      const response = await this.clobClient.get('/trades', {
+        params: { asset_id: tokenId, limit },
+      });
+      return response.data || [];
+    } catch (error: any) {
+      logger.warn(`Token trades fetch failed for ${tokenId}: ${error.message}`);
+      return [];
+    }
+  }
+
+  /**
+   * Fetch market resolution status
+   */
+  async fetchMarketStatus(marketId: string): Promise<any | null> {
+    try {
+      const response = await this.httpClient.get(`/markets/${marketId}`);
+      return response.data || null;
+    } catch (error: any) {
+      logger.warn(`Market status fetch failed for ${marketId}: ${error.message}`);
+      return null;
+    }
+  }
+
+  /**
+   * Fetch resolved markets (for ML training data)
+   */
+  async fetchResolvedMarkets(limit: number = 50): Promise<any[]> {
+    try {
+      const response = await this.httpClient.get('/markets', {
+        params: {
+          closed: true,
+          tag: 'crypto',
+          limit,
+          order: 'end_date_iso',
+          ascending: false,
+        },
+      });
+      return response.data || [];
+    } catch (error: any) {
+      logger.warn(`Resolved markets fetch failed: ${error.message}`);
+      return [];
+    }
+  }
+
+  /**
+   * Fetch market price history (time series)
+   */
+  async fetchPriceHistory(tokenId: string, interval: string = '5m'): Promise<any[]> {
+    try {
+      const response = await this.clobClient.get('/prices-history', {
+        params: {
+          token_id: tokenId,
+          interval,
+          fidelity: 60, // 1 min granularity
+        },
+      });
+      return response.data?.history || [];
+    } catch (error: any) {
+      logger.debug(`Price history fetch failed for ${tokenId}: ${error.message}`);
+      return [];
+    }
+  }
+
+  /**
    * Get cached BTC markets
    */
   getBTCMarkets(): PolymarketMarket[] {
