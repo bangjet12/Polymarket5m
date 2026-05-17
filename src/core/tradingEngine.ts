@@ -3,33 +3,69 @@ import { SpotPriceFeed } from '../feeds/spotPrice';
 import { PolymarketClient } from '../feeds/polymarket';
 import { HistoricalDataFeed } from '../feeds/historicalData';
 import { ResolutionTracker } from '../feeds/resolutionTracker';
+import { WhaleTracker } from '../feeds/whaleTracker';
 import { InefficiencyDetector } from '../strategy/inefficiencyDetector';
 import { MLConfidenceLayer } from '../strategy/mlConfidence';
 import { TimeDecayEngine } from '../strategy/timeDecay';
+import { MomentumFilter } from '../strategy/momentumFilter';
+import { OrderbookImbalanceAnalyzer } from '../strategy/orderbookImbalance';
+import { MultiTimeframeConfirmation } from '../strategy/multiTimeframe';
 import { OrderExecutor } from '../execution/orderExecutor';
+import { ExitManager } from '../execution/exitManager';
 import { RiskManager } from '../risk/riskManager';
 import { AlertManager } from '../utils/alerts';
+import { PaperTrader } from './paperTrader';
 import { BotStatus, TradeLog, TradeSignal } from '../types';
 import { logger } from '../utils/logger';
 
 /**
- * Main Trading Engine
- * Orchestrates the full cycle: fetch -> analyze -> execute -> log
+ * Main Trading Engine v2
+ * 
+ * Full pipeline per cycle:
+ * 1. Fetch BTC spot (5 exchanges) + sync orders
+ * 2. Check resolutions + exit managed positions (TP/SL/trailing/time)
+ * 3. Detect inefficiencies (spot vs implied)
+ * 4. For each signal, apply 7-layer confidence filter:
+ *    a) Resolution safety check
+ *    b) Time decay validation
+ *    c) Momentum filter (1H/4H trend alignment)
+ *    d) Orderbook imbalance analysis
+ *    e) Multi-timeframe confirmation (divergence trend)
+ *    f) Whale/smart money tracker
+ *    g) ML confidence layer (12-feature logistic regression)
+ * 5. Risk check → Execute (real or paper)
+ * 6. Register with Exit Manager for active management
+ * 
  * Runs on 5-minute intervals, 24/7
  */
 export class TradingEngine {
+  // Data feeds
   private priceFeed: SpotPriceFeed;
   private polyClient: PolymarketClient;
   private historicalFeed: HistoricalDataFeed;
   private resolutionTracker: ResolutionTracker;
+  private whaleTracker: WhaleTracker;
+
+  // Strategy layers
   private detector: InefficiencyDetector;
   private mlConfidence: MLConfidenceLayer;
   private timeDecay: TimeDecayEngine;
+  private momentumFilter: MomentumFilter;
+  private orderbookImbalance: OrderbookImbalanceAnalyzer;
+  private multiTimeframe: MultiTimeframeConfirmation;
+
+  // Execution
   private executor: OrderExecutor;
+  private exitManager: ExitManager;
+  private paperTrader: PaperTrader;
+
+  // Risk & alerts
   private riskManager: RiskManager;
   private alerts: AlertManager;
 
+  // State
   private isRunning = false;
+  private isPaperMode = false;
   private startTime = 0;
   private lastCycleTime = 0;
   private cycleCount = 0;
@@ -43,10 +79,19 @@ export class TradingEngine {
     this.riskManager = new RiskManager();
     this.alerts = new AlertManager();
     this.resolutionTracker = new ResolutionTracker(this.riskManager, this.alerts);
+    this.whaleTracker = new WhaleTracker();
     this.detector = new InefficiencyDetector(this.polyClient, this.priceFeed);
     this.mlConfidence = new MLConfidenceLayer(this.historicalFeed);
     this.timeDecay = new TimeDecayEngine();
+    this.momentumFilter = new MomentumFilter();
+    this.orderbookImbalance = new OrderbookImbalanceAnalyzer(this.polyClient);
+    this.multiTimeframe = new MultiTimeframeConfirmation();
     this.executor = new OrderExecutor();
+    this.exitManager = new ExitManager(this.polyClient);
+    this.paperTrader = new PaperTrader();
+
+    // Check paper trading mode
+    this.isPaperMode = process.env.PAPER_TRADING === 'true';
   }
 
   /**
@@ -59,13 +104,15 @@ export class TradingEngine {
     }
 
     logger.info('═══════════════════════════════════════════════════');
-    logger.info('  POLYMARKET BTC 5M TRADER - STARTING');
+    logger.info('  POLYMARKET BTC 5M TRADER v2 - STARTING');
+    logger.info(`  Mode: ${this.isPaperMode ? '📝 PAPER TRADING' : '💰 LIVE TRADING'}`);
     logger.info('═══════════════════════════════════════════════════');
     logger.info(`Interval: ${config.strategy.tradingIntervalMs / 1000}s`);
     logger.info(`Min Divergence: ${config.strategy.minDivergence}%`);
     logger.info(`Max Position: $${config.risk.maxPositionSize}`);
     logger.info(`Max Exposure: $${config.risk.maxTotalExposure}`);
     logger.info(`Daily Loss Limit: $${config.risk.dailyLossLimit}`);
+    logger.info(`Filters: Momentum + Orderbook + MTF + Whale + ML + TimeDecay`);
     logger.info('═══════════════════════════════════════════════════');
 
     this.isRunning = true;
@@ -83,6 +130,9 @@ export class TradingEngine {
     if (tokenIds.length > 0) {
       this.polyClient.connectWebSocket(tokenIds);
     }
+
+    // Pre-warm momentum cache
+    await this.momentumFilter.getMomentum();
 
     // Run first cycle immediately
     await this.runCycle();
@@ -102,13 +152,14 @@ export class TradingEngine {
     // Periodic status update (every hour)
     setInterval(() => this.sendStatusUpdate(), 60 * 60 * 1000);
 
-    // Periodic historical data & cache cleanup (every 30 minutes)
+    // Periodic cleanup (every 30 minutes)
     setInterval(() => {
       this.historicalFeed.cleanCache();
       this.resolutionTracker.cleanup();
+      this.whaleTracker.clearCache();
     }, 30 * 60 * 1000);
 
-    logger.info('🚀 Trading engine started successfully');
+    logger.info('🚀 Trading engine v2 started successfully');
   }
 
   /**
@@ -124,10 +175,17 @@ export class TradingEngine {
     }
 
     // Cancel all open orders
-    await this.executor.cancelAllOrders();
+    if (!this.isPaperMode) {
+      await this.executor.cancelAllOrders();
+    }
 
     // Disconnect WebSocket
     this.polyClient.disconnect();
+
+    // Print paper trading summary if in paper mode
+    if (this.isPaperMode) {
+      this.paperTrader.printSummary();
+    }
 
     // Send shutdown notification
     await this.alerts.notifyShutdown(reason);
@@ -143,19 +201,34 @@ export class TradingEngine {
     this.cycleCount++;
 
     try {
-      logger.info(`\n━━━ Cycle #${this.cycleCount} ━━━━━━━━━━━━━━━━━━━━━━━━━━━`);
+      logger.info(`\n━━━ Cycle #${this.cycleCount} ${this.isPaperMode ? '[PAPER]' : '[LIVE]'} ━━━━━━━━━━━━━━━━━━`);
 
-      // Step 1: Get current spot price (from 5 sources: Binance, Coinbase, CoinGecko, Kraken, OKX)
+      // ═══ STEP 1: Fetch prices & sync ═══
       const spotPrice = await this.priceFeed.getSpotPrice();
       logger.info(`💰 BTC Spot: $${spotPrice.price.toFixed(2)}`);
 
-      // Step 2: Sync order status
-      await this.executor.syncOrderStatus();
+      if (!this.isPaperMode) {
+        await this.executor.syncOrderStatus();
+      }
 
-      // Step 3: Check market resolutions (auto-close positions)
+      // ═══ STEP 2: Check exits on managed positions ═══
+      const exitDecisions = await this.exitManager.checkExits();
+      for (const { marketId, decision } of exitDecisions) {
+        if (decision.shouldExit) {
+          if (this.isPaperMode) {
+            this.paperTrader.closePosition(marketId, decision.exitPrice, decision.rule?.reason || 'Exit rule');
+          } else {
+            this.riskManager.closePosition(marketId, decision.exitPrice);
+          }
+          this.exitManager.removePosition(marketId);
+          logger.info(`🚪 Exited: ${marketId.slice(0, 8)}... | Rule: ${decision.rule?.type} | PnL: $${decision.estimatedPnl.toFixed(2)}`);
+        }
+      }
+
+      // ═══ STEP 3: Check resolutions ═══
       await this.checkResolutions();
 
-      // Step 4: Detect inefficiencies
+      // ═══ STEP 4: Detect inefficiencies ═══
       const signals = await this.detector.detectInefficiencies();
 
       if (signals.length === 0) {
@@ -164,77 +237,128 @@ export class TradingEngine {
         return;
       }
 
-      // Step 5: Get cross-exchange price dispersion for ML
+      // ═══ STEP 5: Multi-layer filtering & execution ═══
       const priceDispersion = await this.priceFeed.getPriceDispersion();
-
-      // Step 6: Apply ML confidence + time decay + resolution safety
       let tradesExecuted = 0;
 
       for (const signal of signals) {
-        // Resolution safety check
+        // ──── Filter A: Resolution Safety ────
         const safetyCheck = this.resolutionTracker.isMarketSafeToTrade(signal.market.id);
         if (!safetyCheck.safe) {
-          logger.info(`⏭️ Signal skipped (resolution): ${safetyCheck.reason}`);
+          logger.info(`⏭️ [Resolution] ${safetyCheck.reason}`);
           continue;
         }
 
-        // Time decay check - don't trade too close to expiry
-        if (this.timeDecay.getTimeDecayMultiplier(signal.market, signal.spotPrice, signal.impliedPrice) < 0.5) {
-          logger.info(`⏭️ Signal skipped: too far from expiry, low predictability`);
-          continue;
-        }
-
-        // Check if too close to expiry (< 1 hour)
         if (this.resolutionTracker.isTooCloseToExpiry(signal.market, 1)) {
-          logger.info(`⏭️ Signal skipped: too close to resolution (<1h)`);
+          logger.info(`⏭️ [Expiry] Too close to resolution (<1h)`);
           continue;
         }
 
-        // Fetch historical data for this market
+        // ──── Filter B: Momentum Alignment (1H/4H) ────
+        const momentumCheck = await this.momentumFilter.checkMomentumAlignment(signal);
+        if (!momentumCheck.allowed) {
+          logger.info(`⏭️ [Momentum] ${momentumCheck.reason}`);
+          continue;
+        }
+        logger.info(`📈 Momentum: ×${momentumCheck.confidenceMultiplier.toFixed(2)} | ${momentumCheck.reason}`);
+
+        // ──── Filter C: Multi-Timeframe Confirmation ────
+        const bbo = this.polyClient.getBBO(signal.tokenId);
+        const marketPrice = bbo ? (bbo.bid + bbo.ask) / 2 : signal.suggestedPrice;
+        this.multiTimeframe.recordSnapshot(signal, marketPrice);
+        const mtfResult = this.multiTimeframe.analyzeSignal(signal);
+        logger.info(`📐 MTF: ×${mtfResult.confidenceMultiplier.toFixed(2)} | ${mtfResult.reason}`);
+
+        // If divergence is shrinking fast, skip
+        if (mtfResult.trend === 'SHRINKING' && mtfResult.divergenceSlope < -0.5) {
+          logger.info(`⏭️ [MTF] Divergence closing too fast (slope=${mtfResult.divergenceSlope.toFixed(2)})`);
+          continue;
+        }
+
+        // ──── Filter D: Orderbook Imbalance ────
+        const obResult = await this.orderbookImbalance.analyzeImbalance(signal);
+        logger.info(`📊 OB: ×${obResult.confidenceMultiplier.toFixed(2)} | ${obResult.reason}`);
+
+        // ──── Filter E: Whale Tracker ────
+        const whaleResult = await this.whaleTracker.analyzeWhaleActivity(signal);
+        logger.info(`🐋 Whale: ×${whaleResult.confidenceMultiplier.toFixed(2)} | ${whaleResult.reason}`);
+
+        // ──── Filter F: Time Decay ────
+        const decayMultiplier = this.timeDecay.getTimeDecayMultiplier(signal.market, signal.spotPrice, signal.impliedPrice);
+        if (decayMultiplier < 0.5) {
+          logger.info(`⏭️ [TimeDecay] Low predictability (×${decayMultiplier.toFixed(2)})`);
+          continue;
+        }
+
+        const decayScore = this.timeDecay.scoreTimeDecayOpportunity(
+          signal.market, signal.spotPrice, signal.impliedPrice,
+          signal.suggestedPrice, this.priceFeed.getRecentVolatility() || 2.0
+        );
+
+        // ──── Filter G: ML Confidence ────
         const yesToken = signal.market.tokens.find(t => t.outcome === 'Yes');
         const history = yesToken
           ? await this.historicalFeed.getMarketHistory(signal.market.id, yesToken.tokenId)
           : null;
 
-        // Apply ML confidence layer
         const mlResult = this.mlConfidence.getMLConfidence(signal, history, priceDispersion);
-        const enhancedConfidence = mlResult.adjustedConfidence;
-
         logger.info(`🧠 ML: ${mlResult.explanation}`);
-        logger.info(`📊 Confidence: ${(signal.confidence * 100).toFixed(0)}% → ${(enhancedConfidence * 100).toFixed(0)}% (ML-adjusted)`);
 
-        // Apply time decay scoring
-        const decayScore = this.timeDecay.scoreTimeDecayOpportunity(
-          signal.market,
-          signal.spotPrice,
-          signal.impliedPrice,
-          signal.suggestedPrice,
-          this.priceFeed.getRecentVolatility() || 2.0
-        );
-        logger.info(`⏱️ Time Decay: score=${decayScore.score} | ${decayScore.reason}`);
+        // ═══ COMBINE ALL CONFIDENCE MULTIPLIERS ═══
+        const baseConfidence = signal.confidence;
+        let finalConfidence = mlResult.adjustedConfidence;
 
-        // Update signal confidence with ML + time decay
-        signal.confidence = enhancedConfidence * (1 + decayScore.score / 200);
-        signal.confidence = Math.min(0.98, signal.confidence);
+        // Apply all multipliers
+        finalConfidence *= momentumCheck.confidenceMultiplier;
+        finalConfidence *= mtfResult.confidenceMultiplier;
+        finalConfidence *= obResult.confidenceMultiplier;
+        finalConfidence *= whaleResult.confidenceMultiplier;
+        finalConfidence *= (1 + decayScore.score / 200);
 
-        // Risk check (with updated confidence)
+        // Clamp
+        finalConfidence = Math.max(0, Math.min(0.98, finalConfidence));
+        signal.confidence = finalConfidence;
+
+        logger.info(`🎯 Final Confidence: ${(baseConfidence * 100).toFixed(0)}% → ${(finalConfidence * 100).toFixed(0)}% (7-layer filtered)`);
+
+        // ──── Risk Check ────
         const riskCheck = this.riskManager.canTrade(signal);
         if (!riskCheck.allowed) {
-          logger.info(`⏭️ Signal skipped: ${riskCheck.reason}`);
+          logger.info(`⏭️ [Risk] ${riskCheck.reason}`);
           continue;
         }
 
-        // Track this market for resolution
+        // Track market for resolution
         this.resolutionTracker.trackMarket(signal.market);
 
-        // Adjust size based on risk state
+        // Adjust size
         signal.suggestedSize = this.riskManager.adjustSize(signal);
 
-        // Execute
-        const order = await this.executor.executeSignal(signal);
-        
+        // ═══ EXECUTE ═══
+        let order;
+        if (this.isPaperMode) {
+          order = this.paperTrader.executeSignal(signal);
+        } else {
+          order = await this.executor.executeSignal(signal);
+        }
+
         // Register with risk manager
         this.riskManager.registerTrade(signal, order);
+
+        // Register with exit manager for TP/SL/trailing management
+        if (order.status === 'OPEN' || order.status === 'FILLED') {
+          const position = {
+            market: signal.market.id,
+            tokenId: signal.tokenId,
+            outcome: signal.outcome,
+            size: signal.suggestedSize,
+            avgEntryPrice: signal.suggestedPrice,
+            currentPrice: signal.suggestedPrice,
+            unrealizedPnl: 0,
+            openedAt: Date.now(),
+          };
+          this.exitManager.registerPosition(position, signal);
+        }
 
         // Log trade
         const tradeLog: TradeLog = {
@@ -250,20 +374,23 @@ export class TradingEngine {
         await this.alerts.notifyTrade(signal, tradeLog.result === 'SUCCESS');
 
         tradesExecuted++;
-
-        // Small delay between orders
         await this.sleep(500);
       }
 
       const cycleDuration = Date.now() - cycleStart;
-      logger.info(`✅ Cycle complete: ${tradesExecuted} trades | ${cycleDuration}ms`);
+      logger.info(`✅ Cycle complete: ${tradesExecuted} trades | ${cycleDuration}ms | ` +
+                  `Managed positions: ${this.exitManager.getCount()}`);
       this.lastCycleTime = Date.now();
+
+      // Print paper stats every 10 cycles
+      if (this.isPaperMode && this.cycleCount % 10 === 0) {
+        this.paperTrader.printSummary();
+      }
 
     } catch (error: any) {
       logger.error(`❌ Cycle error: ${error.message}`);
       logger.error(error.stack);
 
-      // If too many cycle errors, halt
       if (this.shouldHalt(error)) {
         this.riskManager.halt(`Repeated cycle errors: ${error.message}`);
         await this.alerts.notifyRisk(
@@ -282,10 +409,13 @@ export class TradingEngine {
       await this.polyClient.fetchBTCMarkets();
       const markets = this.polyClient.getBTCMarkets();
 
-      // Track all markets for resolution
       for (const market of markets) {
         this.resolutionTracker.trackMarket(market);
       }
+
+      // Clean up multi-timeframe data for inactive markets
+      const activeIds = new Set(markets.map(m => m.id));
+      this.multiTimeframe.cleanup(activeIds);
 
       logger.info(`🔄 Markets refreshed: ${markets.length} BTC markets active`);
     } catch (error: any) {
@@ -301,41 +431,42 @@ export class TradingEngine {
       const events = await this.resolutionTracker.checkResolutions();
 
       for (const event of events) {
-        if (event.newStatus === 'RESOLVED' && event.pnlImpact !== undefined) {
-          // Train ML model with this resolution outcome
-          const relatedTrade = this.tradeHistory.find(t => t.signal.market.id === event.marketId);
-          if (relatedTrade) {
-            const history = this.historicalFeed.getCachedHistory(event.marketId);
-            const wasProfit = (event.pnlImpact || 0) > 0;
-            this.mlConfidence.train(relatedTrade.signal, history, 0, wasProfit);
-            logger.info(`🧠 ML trained from resolution: ${wasProfit ? 'WIN' : 'LOSS'} | Market: ${event.marketId.slice(0, 8)}...`);
+        if (event.newStatus === 'RESOLVED') {
+          // Close paper position if in paper mode
+          if (this.isPaperMode && event.winningOutcome) {
+            this.paperTrader.resolvePosition(event.marketId, event.winningOutcome);
+          }
+
+          // Remove from exit manager
+          this.exitManager.removePosition(event.marketId);
+
+          // Train ML model
+          if (event.pnlImpact !== undefined) {
+            const relatedTrade = this.tradeHistory.find(t => t.signal.market.id === event.marketId);
+            if (relatedTrade) {
+              const history = this.historicalFeed.getCachedHistory(event.marketId);
+              const wasProfit = (event.pnlImpact || 0) > 0;
+              this.mlConfidence.train(relatedTrade.signal, history, 0, wasProfit);
+              logger.info(`🧠 ML trained: ${wasProfit ? 'WIN' : 'LOSS'} | ${event.marketId.slice(0, 8)}...`);
+            }
           }
         }
       }
 
-      // Log resolution stats periodically
       const stats = this.resolutionTracker.getResolutionStats();
       if (stats.totalResolved > 0 && stats.totalResolved % 5 === 0) {
-        logger.info(`📊 Resolution Stats: ${stats.totalResolved} resolved | ` +
-                    `WR: ${(stats.winRate * 100).toFixed(0)}% | ` +
-                    `Total P&L: $${stats.totalPnl.toFixed(2)}`);
+        logger.info(`📊 Stats: ${stats.totalResolved} resolved | WR: ${(stats.winRate * 100).toFixed(0)}% | P&L: $${stats.totalPnl.toFixed(2)}`);
       }
     } catch (error: any) {
       logger.warn(`Resolution check error: ${error.message}`);
     }
   }
 
-  /**
-   * Send periodic status update
-   */
   private async sendStatusUpdate(): Promise<void> {
     const status = this.getStatus();
     await this.alerts.notifyStatus(status);
   }
 
-  /**
-   * Get current bot status
-   */
   getStatus(): BotStatus {
     return {
       running: this.isRunning,
@@ -345,17 +476,12 @@ export class TradingEngine {
       riskState: this.riskManager.getState(),
       spotPrice: this.priceFeed.getLastPrice() || { source: 'aggregate', price: 0, timestamp: 0 },
       activeMarkets: this.polyClient.getBTCMarkets().length,
-      openOrders: this.executor.getOpenOrderCount(),
+      openOrders: this.isPaperMode ? this.paperTrader.getPositions().length : this.executor.getOpenOrderCount(),
     };
   }
 
-  /**
-   * Determine if errors warrant halting
-   */
   private shouldHalt(error: Error): boolean {
-    // Halt on authentication errors
     if (error.message.includes('401') || error.message.includes('403')) return true;
-    // Halt on rate limit
     if (error.message.includes('429')) return true;
     return false;
   }
