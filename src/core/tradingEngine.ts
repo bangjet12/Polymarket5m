@@ -10,31 +10,39 @@ import { TimeDecayEngine } from '../strategy/timeDecay';
 import { MomentumFilter } from '../strategy/momentumFilter';
 import { OrderbookImbalanceAnalyzer } from '../strategy/orderbookImbalance';
 import { MultiTimeframeConfirmation } from '../strategy/multiTimeframe';
+import { MarketRegimeDetector } from '../strategy/marketRegime';
+import { AdaptiveParameterTuner } from '../strategy/adaptiveParams';
 import { OrderExecutor } from '../execution/orderExecutor';
 import { ExitManager } from '../execution/exitManager';
 import { RiskManager } from '../risk/riskManager';
+import { KellyCriterion } from '../risk/kellyCriterion';
 import { AlertManager } from '../utils/alerts';
 import { PaperTrader } from './paperTrader';
 import { BotStatus, TradeLog, TradeSignal } from '../types';
 import { logger } from '../utils/logger';
 
 /**
- * Main Trading Engine v2
+ * Main Trading Engine v3
  * 
  * Full pipeline per cycle:
  * 1. Fetch BTC spot (5 exchanges) + sync orders
- * 2. Check resolutions + exit managed positions (TP/SL/trailing/time)
- * 3. Detect inefficiencies (spot vs implied)
- * 4. For each signal, apply 7-layer confidence filter:
- *    a) Resolution safety check
- *    b) Time decay validation
- *    c) Momentum filter (1H/4H trend alignment)
- *    d) Orderbook imbalance analysis
- *    e) Multi-timeframe confirmation (divergence trend)
- *    f) Whale/smart money tracker
- *    g) ML confidence layer (12-feature logistic regression)
- * 5. Risk check → Execute (real or paper)
- * 6. Register with Exit Manager for active management
+ * 2. Detect market regime (TRENDING/RANGING/VOLATILE/QUIET)
+ * 3. Check resolutions + exit managed positions (TP/SL/trailing/time)
+ * 4. Detect inefficiencies (spot vs implied)
+ * 5. For each signal, apply 10-layer confidence filter:
+ *    a) Market regime gate (blocks trades in VOLATILE regime)
+ *    b) Adaptive parameter check (dynamic MIN_CONFIDENCE/MIN_DIVERGENCE)
+ *    c) Resolution safety check
+ *    d) Time decay validation
+ *    e) Momentum filter (1H/4H trend alignment)
+ *    f) Orderbook imbalance analysis
+ *    g) Multi-timeframe confirmation (divergence trend)
+ *    h) Whale/smart money tracker
+ *    i) ML confidence layer (12-feature logistic regression)
+ *    j) Market regime alignment (signal vs trend direction)
+ * 6. Kelly Criterion position sizing
+ * 7. Risk check → Execute (real or paper)
+ * 8. Register with Exit Manager + record for adaptive tuning
  * 
  * Runs on 5-minute intervals, 24/7
  */
@@ -53,6 +61,8 @@ export class TradingEngine {
   private momentumFilter: MomentumFilter;
   private orderbookImbalance: OrderbookImbalanceAnalyzer;
   private multiTimeframe: MultiTimeframeConfirmation;
+  private marketRegime: MarketRegimeDetector;
+  private adaptiveParams: AdaptiveParameterTuner;
 
   // Execution
   private executor: OrderExecutor;
@@ -61,6 +71,7 @@ export class TradingEngine {
 
   // Risk & alerts
   private riskManager: RiskManager;
+  private kellyCriterion: KellyCriterion;
   private alerts: AlertManager;
 
   // State
@@ -86,9 +97,14 @@ export class TradingEngine {
     this.momentumFilter = new MomentumFilter();
     this.orderbookImbalance = new OrderbookImbalanceAnalyzer(this.polyClient);
     this.multiTimeframe = new MultiTimeframeConfirmation();
+    this.marketRegime = new MarketRegimeDetector();
+    this.adaptiveParams = new AdaptiveParameterTuner();
     this.executor = new OrderExecutor();
     this.exitManager = new ExitManager(this.polyClient);
     this.paperTrader = new PaperTrader();
+    this.kellyCriterion = new KellyCriterion(
+      parseFloat(process.env.PAPER_STARTING_BALANCE || '15')
+    );
 
     // Check paper trading mode
     this.isPaperMode = process.env.PAPER_TRADING === 'true';
@@ -104,7 +120,7 @@ export class TradingEngine {
     }
 
     logger.info('═══════════════════════════════════════════════════');
-    logger.info('  POLYMARKET BTC 5M TRADER v2 - STARTING');
+    logger.info('  POLYMARKET BTC 5M TRADER v3 - STARTING');
     logger.info(`  Mode: ${this.isPaperMode ? '📝 PAPER TRADING' : '💰 LIVE TRADING'}`);
     logger.info('═══════════════════════════════════════════════════');
     logger.info(`Interval: ${config.strategy.tradingIntervalMs / 1000}s`);
@@ -112,7 +128,7 @@ export class TradingEngine {
     logger.info(`Max Position: $${config.risk.maxPositionSize}`);
     logger.info(`Max Exposure: $${config.risk.maxTotalExposure}`);
     logger.info(`Daily Loss Limit: $${config.risk.dailyLossLimit}`);
-    logger.info(`Filters: Momentum + Orderbook + MTF + Whale + ML + TimeDecay`);
+    logger.info(`Filters: Momentum + Orderbook + MTF + Whale + ML + TimeDecay + Regime + Kelly + Adaptive`);
     logger.info('═══════════════════════════════════════════════════');
 
     this.isRunning = true;
@@ -159,7 +175,7 @@ export class TradingEngine {
       this.whaleTracker.clearCache();
     }, 30 * 60 * 1000);
 
-    logger.info('🚀 Trading engine v2 started successfully');
+    logger.info('🚀 Trading engine v3 started successfully');
   }
 
   /**
@@ -233,6 +249,34 @@ export class TradingEngine {
 
       if (signals.length === 0) {
         logger.info('No trading opportunities detected this cycle');
+        this.lastCycleTime = Date.now();
+        return;
+      }
+
+      // ═══ STEP 4b: Market Regime Detection ═══
+      const regime = await this.marketRegime.detectRegime();
+
+      // Block trading in VOLATILE regime
+      if (!regime.tradingAllowed) {
+        logger.info(`🛑 [Regime] ${regime.reason}`);
+        this.lastCycleTime = Date.now();
+        return;
+      }
+
+      // ═══ STEP 4c: Adaptive Parameter Check ═══
+      const adaptiveP = this.adaptiveParams.getParams();
+
+      // Check if current hour is historically bad
+      if (this.adaptiveParams.isCurrentHourBad()) {
+        logger.info(`⏭️ [Adaptive] Current hour historically unprofitable - skipping cycle`);
+        this.lastCycleTime = Date.now();
+        return;
+      }
+
+      // ═══ STEP 4d: Kelly Pause Check ═══
+      const kellyPause = this.kellyCriterion.shouldPause();
+      if (kellyPause.pause) {
+        logger.info(`⏸️ [Kelly] ${kellyPause.reason}`);
         this.lastCycleTime = Date.now();
         return;
       }
@@ -315,11 +359,37 @@ export class TradingEngine {
         finalConfidence *= whaleResult.confidenceMultiplier;
         finalConfidence *= (1 + decayScore.score / 200);
 
+        // ──── Filter H: Market Regime Alignment ────
+        const regimeAlignment = this.marketRegime.isSignalAlignedWithRegime(signal.side, signal.outcome);
+        finalConfidence *= regimeAlignment.multiplier;
+        finalConfidence *= regime.confidenceMultiplier;
+        logger.info(`🌡️ Regime: ×${(regimeAlignment.multiplier * regime.confidenceMultiplier).toFixed(2)} | ${regimeAlignment.reason}`);
+
+        // ──── Filter I: Adaptive Regime Multiplier ────
+        const adaptiveRegimeM = this.adaptiveParams.getRegimeMultiplier(regime.regime);
+        finalConfidence *= adaptiveRegimeM;
+
+        // ──── Filter J: Hourly Performance Multiplier ────
+        const hourlyM = this.adaptiveParams.getHourlyMultiplier();
+        finalConfidence *= hourlyM;
+
         // Clamp
         finalConfidence = Math.max(0, Math.min(0.98, finalConfidence));
         signal.confidence = finalConfidence;
 
-        logger.info(`🎯 Final Confidence: ${(baseConfidence * 100).toFixed(0)}% → ${(finalConfidence * 100).toFixed(0)}% (7-layer filtered)`);
+        logger.info(`🎯 Final Confidence: ${(baseConfidence * 100).toFixed(0)}% → ${(finalConfidence * 100).toFixed(0)}% (10-layer filtered)`);
+
+        // ──── Adaptive MIN_CONFIDENCE Gate ────
+        if (finalConfidence < adaptiveP.minConfidence) {
+          logger.info(`⏭️ [Adaptive] Confidence ${(finalConfidence * 100).toFixed(0)}% < adaptive min ${(adaptiveP.minConfidence * 100).toFixed(0)}%`);
+          continue;
+        }
+
+        // ──── Adaptive MIN_DIVERGENCE Gate ────
+        if (signal.divergence < adaptiveP.minDivergence) {
+          logger.info(`⏭️ [Adaptive] Divergence ${signal.divergence.toFixed(1)}% < adaptive min ${adaptiveP.minDivergence.toFixed(1)}%`);
+          continue;
+        }
 
         // ──── Risk Check ────
         const riskCheck = this.riskManager.canTrade(signal);
@@ -331,8 +401,16 @@ export class TradingEngine {
         // Track market for resolution
         this.resolutionTracker.trackMarket(signal.market);
 
-        // Adjust size
-        signal.suggestedSize = this.riskManager.adjustSize(signal);
+        // ═══ KELLY CRITERION POSITION SIZING ═══
+        const currentBalance = this.isPaperMode
+          ? this.paperTrader.getBalance()
+          : config.risk.maxTotalExposure - this.riskManager.getState().totalExposure;
+
+        const kellySize = this.kellyCriterion.calculateSize(signal, currentBalance);
+        signal.suggestedSize = Math.min(kellySize.size, this.riskManager.adjustSize(signal));
+        signal.suggestedSize = Math.min(signal.suggestedSize, currentBalance * regime.maxPositionPercent);
+
+        logger.info(`📐 Kelly: $${kellySize.size.toFixed(2)} (${kellySize.riskLevel}) | ${kellySize.reason}`);
 
         // ═══ EXECUTE ═══
         let order;
@@ -440,14 +518,29 @@ export class TradingEngine {
           // Remove from exit manager
           this.exitManager.removePosition(event.marketId);
 
-          // Train ML model
+          // Train ML model + update Kelly + adaptive params
           if (event.pnlImpact !== undefined) {
             const relatedTrade = this.tradeHistory.find(t => t.signal.market.id === event.marketId);
             if (relatedTrade) {
               const history = this.historicalFeed.getCachedHistory(event.marketId);
               const wasProfit = (event.pnlImpact || 0) > 0;
+
+              // Train ML
               this.mlConfidence.train(relatedTrade.signal, history, 0, wasProfit);
-              logger.info(`🧠 ML trained: ${wasProfit ? 'WIN' : 'LOSS'} | ${event.marketId.slice(0, 8)}...`);
+
+              // Update Kelly stats
+              this.kellyCriterion.recordResult(wasProfit, event.pnlImpact || 0);
+
+              // Update adaptive parameters
+              const cachedRegime = this.marketRegime.getCachedRegime();
+              this.adaptiveParams.recordTrade({
+                win: wasProfit,
+                pnl: event.pnlImpact || 0,
+                confidence: relatedTrade.signal.confidence,
+                regime: cachedRegime?.regime || 'RANGING',
+              });
+
+              logger.info(`🧠 Trained: ${wasProfit ? 'WIN' : 'LOSS'} $${(event.pnlImpact || 0).toFixed(2)} | ${event.marketId.slice(0, 8)}...`);
             }
           }
         }
