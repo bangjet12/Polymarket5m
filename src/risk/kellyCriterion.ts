@@ -74,6 +74,10 @@ export class KellyCriterion {
       this.kellyFraction = 0.50; // Half Kelly for larger accounts
     }
 
+    // Log how Kelly aligns with config
+    logger.info(`📐 Kelly: Account=$${accountSize} | MaxPosition=$${config.risk.maxPositionSize} | ` +
+                `Fraction=${(this.kellyFraction * 100).toFixed(0)}% | MaxBankroll=${(this.maxBankrollPercent * 100).toFixed(0)}%`);
+
     // Load or initialize stats
     this.stats = this.loadStats() || this.initializeStats();
     logger.info(`📐 Kelly Criterion initialized: fraction=${(this.kellyFraction * 100).toFixed(0)}% | ` +
