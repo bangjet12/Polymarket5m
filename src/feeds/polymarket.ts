@@ -39,36 +39,49 @@ export class PolymarketClient {
   }
 
   /**
-   * Fetch active BTC-related prediction markets
+   * Fetch ALL active crypto prediction markets (BTC, ETH, SOL, BNB, etc.)
    */
   async fetchBTCMarkets(): Promise<PolymarketMarket[]> {
     try {
-      // Search for BTC/Bitcoin related active markets
+      // Fetch all crypto-tagged active markets
       const response = await this.httpClient.get('/markets', {
         params: {
           active: true,
           closed: false,
           tag: 'crypto',
-          limit: 50,
+          limit: 100,
         },
       });
 
       const allMarkets = response.data || [];
 
-      // Filter for BTC-specific markets (price prediction, milestone, etc.)
+      // Crypto keywords to match - ALL major crypto assets
+      const cryptoKeywords = [
+        'bitcoin', 'btc',
+        'ethereum', 'eth', 'ether',
+        'solana', 'sol',
+        'bnb', 'binance coin',
+        'xrp', 'ripple',
+        'dogecoin', 'doge',
+        'cardano', 'ada',
+        'avalanche', 'avax',
+        'polkadot', 'dot',
+        'polygon', 'matic',
+        'chainlink', 'link',
+        'litecoin', 'ltc',
+        'crypto', 'cryptocurrency',
+      ];
+
+      // Filter for any crypto price prediction market
       this.btcMarkets = allMarkets.filter((market: any) => {
         const q = (market.question || '').toLowerCase();
-        return (
-          q.includes('bitcoin') ||
-          q.includes('btc') ||
-          q.includes('bitcoin price')
-        );
+        return cryptoKeywords.some(keyword => q.includes(keyword));
       }).map((m: any) => this.normalizeMarket(m));
 
-      logger.info(`Found ${this.btcMarkets.length} active BTC markets on Polymarket`);
+      logger.info(`Found ${this.btcMarkets.length} active CRYPTO markets on Polymarket`);
       return this.btcMarkets;
     } catch (error: any) {
-      logger.error(`Failed to fetch BTC markets: ${error.message}`);
+      logger.error(`Failed to fetch crypto markets: ${error.message}`);
       return this.btcMarkets; // return cached
     }
   }

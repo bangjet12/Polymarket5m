@@ -267,6 +267,77 @@ export class SpotPriceFeed {
   }
 
   /**
+   * Get spot price for ANY crypto asset from Binance
+   * Supports: BTC, ETH, SOL, BNB, XRP, DOGE, ADA, AVAX, DOT, MATIC, LINK, LTC
+   */
+  async getAssetPrice(symbol: string): Promise<number | null> {
+    // Map common names to Binance pairs
+    const pairMap: Record<string, string> = {
+      'btc': 'BTCUSDT', 'bitcoin': 'BTCUSDT',
+      'eth': 'ETHUSDT', 'ethereum': 'ETHUSDT', 'ether': 'ETHUSDT',
+      'sol': 'SOLUSDT', 'solana': 'SOLUSDT',
+      'bnb': 'BNBUSDT', 'binance coin': 'BNBUSDT',
+      'xrp': 'XRPUSDT', 'ripple': 'XRPUSDT',
+      'doge': 'DOGEUSDT', 'dogecoin': 'DOGEUSDT',
+      'ada': 'ADAUSDT', 'cardano': 'ADAUSDT',
+      'avax': 'AVAXUSDT', 'avalanche': 'AVAXUSDT',
+      'dot': 'DOTUSDT', 'polkadot': 'DOTUSDT',
+      'matic': 'MATICUSDT', 'polygon': 'MATICUSDT',
+      'link': 'LINKUSDT', 'chainlink': 'LINKUSDT',
+      'ltc': 'LTCUSDT', 'litecoin': 'LTCUSDT',
+    };
+
+    const pair = pairMap[symbol.toLowerCase()];
+    if (!pair) return null;
+
+    try {
+      const response = await axios.get(`${config.feeds.binanceUrl}/ticker/price`, {
+        params: { symbol: pair },
+        timeout: 5000,
+      });
+      return parseFloat(response.data.price);
+    } catch (error: any) {
+      logger.debug(`Asset price fetch failed for ${symbol}: ${error.message}`);
+      return null;
+    }
+  }
+
+  /**
+   * Detect which crypto asset a market question refers to
+   * Returns the asset symbol and its current spot price
+   */
+  async detectAssetAndPrice(question: string): Promise<{ asset: string; price: number } | null> {
+    const q = question.toLowerCase();
+
+    // Order matters: check specific names first
+    const assets = [
+      { keywords: ['bitcoin', 'btc'], asset: 'btc' },
+      { keywords: ['ethereum', 'eth', 'ether'], asset: 'eth' },
+      { keywords: ['solana', 'sol'], asset: 'sol' },
+      { keywords: ['bnb', 'binance coin'], asset: 'bnb' },
+      { keywords: ['xrp', 'ripple'], asset: 'xrp' },
+      { keywords: ['dogecoin', 'doge'], asset: 'doge' },
+      { keywords: ['cardano', 'ada'], asset: 'ada' },
+      { keywords: ['avalanche', 'avax'], asset: 'avax' },
+      { keywords: ['polkadot', 'dot'], asset: 'dot' },
+      { keywords: ['polygon', 'matic'], asset: 'matic' },
+      { keywords: ['chainlink', 'link'], asset: 'link' },
+      { keywords: ['litecoin', 'ltc'], asset: 'ltc' },
+    ];
+
+    for (const { keywords, asset } of assets) {
+      if (keywords.some(kw => q.includes(kw))) {
+        const price = await this.getAssetPrice(asset);
+        if (price) {
+          return { asset, price };
+        }
+      }
+    }
+
+    return null;
+  }
+
+  /**
    * Get source health status
    */
   getSourceHealth(): { source: string; healthy: boolean; failures: number }[] {

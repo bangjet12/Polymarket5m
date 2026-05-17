@@ -62,6 +62,10 @@ export class InefficiencyDetector {
    * Analyze a single market for inefficiency
    */
   private async analyzeMarket(market: PolymarketMarket, spotPrice: SpotPrice): Promise<TradeSignal | null> {
+    // Detect which crypto asset this market is about and get its spot price
+    const assetInfo = await this.priceFeed.detectAssetAndPrice(market.question);
+    const actualSpotPrice = assetInfo ? assetInfo.price : spotPrice.price;
+
     // Extract price threshold from market question
     const threshold = this.extractPriceThreshold(market.question);
     if (!threshold) return null;
@@ -79,7 +83,7 @@ export class InefficiencyDetector {
     if (!bbo) return null;
 
     // Calculate fair value based on spot price distance and time
-    const fairValue = this.calculateFairValue(spotPrice.price, threshold, market);
+    const fairValue = this.calculateFairValue(actualSpotPrice, threshold, market);
     const marketPrice = (bbo.bid + bbo.ask) / 2;
 
     // Calculate divergence
@@ -121,34 +125,39 @@ export class InefficiencyDetector {
       side,
       tokenId,
       outcome,
-      spotPrice: spotPrice.price,
+      spotPrice: actualSpotPrice,
       impliedPrice: threshold,
       divergence,
       confidence,
       suggestedSize,
       suggestedPrice: Math.max(0.01, Math.min(0.99, suggestedPrice)),
-      reason: `BTC spot $${spotPrice.price.toFixed(0)} vs threshold $${threshold.toFixed(0)} | ` +
+      reason: `${assetInfo?.asset.toUpperCase() || 'BTC'} spot $${actualSpotPrice.toFixed(2)} vs threshold $${threshold.toFixed(2)} | ` +
               `Market ${marketPrice.toFixed(3)} vs fair ${fairValue.toFixed(3)} | ` +
               `Divergence: ${divergence.toFixed(1)}%`,
       timestamp: Date.now(),
     };
 
     logger.info(`🎯 Signal: ${side} ${outcome} on "${market.question.slice(0, 50)}..." ` +
+                `| ${assetInfo?.asset.toUpperCase() || 'BTC'} $${actualSpotPrice.toFixed(2)} ` +
                 `| Div: ${divergence.toFixed(1)}% | Conf: ${(confidence * 100).toFixed(0)}%`);
 
     return signal;
   }
 
   /**
-   * Extract BTC price threshold from market question
+   * Extract crypto price threshold from market question
+   * Supports all price ranges: $0.05 (DOGE) to $100,000+ (BTC)
    * e.g., "Will Bitcoin be above $70,000 on June 30?" -> 70000
+   * e.g., "Will Ethereum hit $4,000?" -> 4000
+   * e.g., "Will Solana be above $200?" -> 200
+   * e.g., "Will Dogecoin reach $0.50?" -> 0.50
    */
   private extractPriceThreshold(question: string): number | null {
-    // Match patterns like $70,000 or $70000 or $70K or $70k
+    // Match patterns like $70,000 or $70000 or $70K or $0.50 or $200
     const patterns = [
-      /\$([0-9]{1,3}(?:,?[0-9]{3})*)/,           // $70,000 or $70000
-      /\$([0-9]+(?:\.[0-9]+)?)\s*[kK]/,            // $70K or $70k
-      /([0-9]{1,3}(?:,?[0-9]{3})*)\s*(?:USD|usd)/, // 70000 USD
+      /\$([0-9]{1,3}(?:,?[0-9]{3})*(?:\.[0-9]+)?)/,  // $70,000 or $70000 or $4,000.50
+      /\$([0-9]+(?:\.[0-9]+)?)\s*[kK]/,                // $70K or $4.5K
+      /([0-9]{1,3}(?:,?[0-9]{3})*(?:\.[0-9]+)?)\s*(?:USD|usd|dollars?)/, // 70000 USD
     ];
 
     for (const pattern of patterns) {
@@ -157,11 +166,11 @@ export class InefficiencyDetector {
         let value = match[1].replace(/,/g, '');
         let num = parseFloat(value);
         // Handle K notation
-        if (question.toLowerCase().includes('k') && num < 1000) {
+        if (/[kK]/.test(question.slice(match.index || 0, (match.index || 0) + match[0].length + 2)) && num < 10000) {
           num *= 1000;
         }
-        // Sanity check - BTC price should be between 10K and 1M
-        if (num >= 10000 && num <= 1000000) {
+        // Sanity check - any crypto price from $0.001 to $1,000,000
+        if (num >= 0.001 && num <= 1000000) {
           return num;
         }
       }
