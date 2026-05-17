@@ -1,0 +1,31 @@
+{
+  "name": "polymarket-btc-5m-trader",
+  "version": "1.0.0",
+  "description": "Automated BTC 5-minute Polymarket trading terminal - detects spot vs prediction market inefficiencies and executes instantly",
+  "main": "dist/index.js",
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/index.js",
+    "dev": "ts-node src/index.ts",
+    "watch": "tsc --watch"
+  },
+  "keywords": ["polymarket", "btc", "trading", "arbitrage", "automation"],
+  "license": "MIT",
+  "dependencies": {
+    "axios": "^1.7.0",
+    "ethers": "^6.13.0",
+    "ws": "^8.16.0",
+    "dotenv": "^16.4.0",
+    "winston": "^3.11.0",
+    "cron": "^3.1.0",
+    "node-telegram-bot-api": "^0.66.0"
+  },
+  "devDependencies": {
+    "typescript": "^5.4.0",
+    "@types/node": "^20.11.0",
+    "@types/ws": "^8.5.10",
+    "@types/cron": "^2.4.0",
+    "@types/node-telegram-bot-api": "^0.64.0",
+    "ts-node": "^10.9.0"
+  }
+}
