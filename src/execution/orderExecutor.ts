@@ -62,7 +62,7 @@ export class OrderExecutor {
       if (response.data && response.data.orderID) {
         order.id = response.data.orderID;
         order.status = 'OPEN';
-        this.openOrders.set(order.id, order);
+        this.openOrders.set(order.id!, order);
         logger.info(`✅ Order placed successfully: ${order.id}`);
       } else {
         order.status = 'FAILED';
