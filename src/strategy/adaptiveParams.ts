@@ -1,5 +1,5 @@
 import { config } from '../config';
-import { TradeLog, MarketRegime } from '../types';
+import { TradeLog } from '../types';
 import { logger } from '../utils/logger';
 import fs from 'fs';
 import path from 'path';

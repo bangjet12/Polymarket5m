@@ -142,8 +142,8 @@ export class OrderExecutor {
 
     const value = {
       tokenID: orderData.tokenID,
-      price: ethers.parseUnits(orderData.price, 6).toString(),
-      size: ethers.parseUnits(orderData.size, 6).toString(),
+      price: ethers.parseUnits(String(orderData.price), 6).toString(),
+      size: ethers.parseUnits(String(orderData.size), 6).toString(),
       side: orderData.side === 'BUY' ? 0 : 1,
       feeRateBps: orderData.feeRateBps,
       nonce: orderData.nonce,
