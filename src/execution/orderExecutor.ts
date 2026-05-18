@@ -1,7 +1,7 @@
 import axios, { AxiosInstance } from 'axios';
 import { ethers } from 'ethers';
 import { config } from '../config';
-import { Order, TradeSignal, OrderStatus } from '../types';
+import { Order, TradeSignal } from '../types';
 import { logger } from '../utils/logger';
 
 /**
