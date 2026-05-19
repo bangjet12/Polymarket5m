@@ -159,8 +159,8 @@ export class InefficiencyDetector {
     const expiry = new Date(market.endDate).getTime();
     const hoursRemaining = Math.max(0, (expiry - now) / (1000 * 60 * 60));
 
-    // Skip markets expiring beyond 30 days (720 hours) — too unpredictable
-    if (hoursRemaining > 720) return null;
+    // Skip markets expiring beyond 7 days (168 hours) — too unpredictable
+    if (hoursRemaining > 168) return null;
     // Skip markets expiring in less than 1 hour — too risky
     if (hoursRemaining < 1) return null;
 
@@ -195,8 +195,9 @@ export class InefficiencyDetector {
     bbo: { bid: number; ask: number; spread: number },
     hoursRemaining: number
   ): TradeSignal | null {
-    // Trade markets expiring between 1 hour and 30 days (720 hours)
-    if (hoursRemaining > 720 || hoursRemaining < 1) return null;
+    // Trade markets expiring between 1 hour and 7 days (168 hours) ONLY
+    // Markets >7 days = too unpredictable, skip entirely
+    if (hoursRemaining > 168 || hoursRemaining < 1) return null;
 
     // Check if YES token is in the "likely to resolve YES" zone
     // Wider zone for longer-dated markets, tighter for near-expiry
@@ -215,8 +216,7 @@ export class InefficiencyDetector {
       if (hoursRemaining < 6) confidence += 0.15;
       else if (hoursRemaining < 24) confidence += 0.10;
       else if (hoursRemaining < 72) confidence += 0.07;
-      else if (hoursRemaining < 168) confidence += 0.05;
-      else if (hoursRemaining < 720) confidence += 0.02;
+      else if (hoursRemaining < 168) confidence += 0.03;
       if (market.volume > 50000) confidence += 0.05;
       if (market.liquidity > 10000) confidence += 0.05;
       if (bbo.spread < 0.03) confidence += 0.05;
@@ -258,8 +258,7 @@ export class InefficiencyDetector {
       if (hoursRemaining < 6) confidence += 0.15;
       else if (hoursRemaining < 24) confidence += 0.10;
       else if (hoursRemaining < 72) confidence += 0.07;
-      else if (hoursRemaining < 168) confidence += 0.05;
-      else if (hoursRemaining < 720) confidence += 0.02;
+      else if (hoursRemaining < 168) confidence += 0.03;
       if (market.volume > 50000) confidence += 0.05;
       if (market.liquidity > 10000) confidence += 0.05;
 
@@ -355,7 +354,7 @@ export class InefficiencyDetector {
     bbo: { bid: number; ask: number; spread: number },
     hoursRemaining: number
   ): TradeSignal | null {
-    if (hoursRemaining > 720 || hoursRemaining < 0.5) return null;
+    if (hoursRemaining > 168 || hoursRemaining < 0.5) return null;
 
     // YES at 0.90+ → likely resolves YES
     if (yesPrice >= 0.90 && yesPrice <= 0.98) {
