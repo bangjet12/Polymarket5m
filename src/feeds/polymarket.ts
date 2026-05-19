@@ -75,16 +75,17 @@ export class PolymarketClient {
 
       const allMarkets = Array.from(marketMap.values());
 
-      // Filter: only markets with tokens, liquidity > $100, and end date
+      // Filter: only markets with token data, liquidity > $100, and end date
       this.btcMarkets = allMarkets
         .filter((market: any) => {
-          const tokens = market.tokens || [];
-          const liquidity = parseFloat(market.liquidity || '0');
-          const hasEndDate = !!(market.end_date_iso || market.endDate);
-          const hasTokens = tokens.length >= 2;
-          return hasTokens && liquidity >= 100 && hasEndDate;
+          const liquidity = parseFloat(market.liquidity || market.liquidityNum || '0');
+          const hasEndDate = !!(market.end_date_iso || market.endDateIso || market.endDate);
+          const hasTokens = !!(market.clobTokenIds || (market.tokens && market.tokens.length >= 2));
+          const hasOutcomes = !!(market.outcomes || market.outcomePrices);
+          return (hasTokens || hasOutcomes) && liquidity >= 100 && hasEndDate;
         })
-        .map((m: any) => this.normalizeMarket(m));
+        .map((m: any) => this.normalizeMarket(m))
+        .filter((m: PolymarketMarket) => m.tokens.length >= 2);
 
       logger.info(`Found ${this.btcMarkets.length} active markets on Polymarket (ALL categories)`);
       return this.btcMarkets;
@@ -315,24 +316,51 @@ export class PolymarketClient {
 
   /**
    * Normalize raw market data to our type
+   * Handles both formats: direct tokens array OR clobTokenIds + outcomePrices strings
    */
   private normalizeMarket(raw: any): PolymarketMarket {
-    return {
-      id: raw.id || raw.condition_id,
-      conditionId: raw.condition_id || raw.conditionId || '',
-      question: raw.question || '',
-      slug: raw.slug || '',
-      tokens: (raw.tokens || []).map((t: any) => ({
+    let tokens: any[] = [];
+
+    // Format 1: tokens array already present
+    if (raw.tokens && Array.isArray(raw.tokens) && raw.tokens.length > 0) {
+      tokens = raw.tokens.map((t: any) => ({
         tokenId: t.token_id || t.tokenId || '',
         outcome: t.outcome || '',
         price: parseFloat(t.price || '0'),
         winner: t.winner || false,
-      })),
+      }));
+    }
+    // Format 2: clobTokenIds + outcomePrices as JSON strings (Gamma API format)
+    else if (raw.clobTokenIds && raw.outcomePrices) {
+      try {
+        const tokenIds = JSON.parse(raw.clobTokenIds);
+        const prices = JSON.parse(raw.outcomePrices);
+        const outcomes = raw.outcomes ? JSON.parse(raw.outcomes) : ['Yes', 'No'];
+
+        for (let i = 0; i < tokenIds.length; i++) {
+          tokens.push({
+            tokenId: tokenIds[i] || '',
+            outcome: outcomes[i] || (i === 0 ? 'Yes' : 'No'),
+            price: parseFloat(prices[i] || '0'),
+            winner: false,
+          });
+        }
+      } catch (e) {
+        // If parsing fails, try direct values
+      }
+    }
+
+    return {
+      id: raw.id || raw.condition_id,
+      conditionId: raw.condition_id || raw.conditionId || raw.conditionId || '',
+      question: raw.question || '',
+      slug: raw.slug || '',
+      tokens,
       active: raw.active !== false,
       closed: raw.closed === true,
-      endDate: raw.end_date_iso || raw.endDate || '',
-      volume: parseFloat(raw.volume || '0'),
-      liquidity: parseFloat(raw.liquidity || '0'),
+      endDate: raw.end_date_iso || raw.endDateIso || raw.endDate || '',
+      volume: parseFloat(raw.volume || raw.volumeNum || '0'),
+      liquidity: parseFloat(raw.liquidity || raw.liquidityNum || '0'),
     };
   }
 }
