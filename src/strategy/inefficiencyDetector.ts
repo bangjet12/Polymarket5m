@@ -159,6 +159,11 @@ export class InefficiencyDetector {
     const expiry = new Date(market.endDate).getTime();
     const hoursRemaining = Math.max(0, (expiry - now) / (1000 * 60 * 60));
 
+    // Skip markets expiring beyond 30 days (720 hours) — too unpredictable
+    if (hoursRemaining > 720) return null;
+    // Skip markets expiring in less than 1 hour — too risky
+    if (hoursRemaining < 1) return null;
+
     // Strategy A: Near-expiry extreme prices (highest winrate)
     // If a token is at 0.88-0.96 with <48h to go → likely resolves at 1.0
     // BUY that token = high probability profit
@@ -179,8 +184,8 @@ export class InefficiencyDetector {
   }
 
   /**
-   * Detect near-expiry opportunity: token priced 0.85-0.96 with <48h remaining
-   * These have historically high resolve-to-1.0 rates
+   * Detect near-expiry opportunity: token priced 0.75-0.96 with 1h-30days remaining
+   * Markets expiring within 30 days are more predictable and trade more often
    */
   private detectNearExpiryOpportunity(
     market: PolymarketMarket,
@@ -190,22 +195,28 @@ export class InefficiencyDetector {
     bbo: { bid: number; ask: number; spread: number },
     hoursRemaining: number
   ): TradeSignal | null {
-    // Only works within 48 hours of expiry
-    if (hoursRemaining > 48 || hoursRemaining < 1) return null;
+    // Trade markets expiring between 1 hour and 30 days (720 hours)
+    if (hoursRemaining > 720 || hoursRemaining < 1) return null;
 
     // Check if YES token is in the "likely to resolve YES" zone
-    if (yesPrice >= 0.82 && yesPrice <= 0.96) {
+    // Wider zone for longer-dated markets, tighter for near-expiry
+    const minPrice = hoursRemaining < 48 ? 0.82 : hoursRemaining < 168 ? 0.78 : 0.75;
+    if (yesPrice >= minPrice && yesPrice <= 0.96) {
       const expectedProfit = (1.0 - yesPrice) * 100; // % profit if resolves YES
       const divergence = expectedProfit;
 
       if (divergence < config.strategy.minDivergence) return null;
 
       // Higher confidence when closer to expiry AND higher current price
-      let confidence = 0.55;
+      let confidence = 0.50;
       if (yesPrice >= 0.90) confidence += 0.15;
       else if (yesPrice >= 0.85) confidence += 0.10;
-      if (hoursRemaining < 24) confidence += 0.10;
-      if (hoursRemaining < 6) confidence += 0.10;
+      else if (yesPrice >= 0.80) confidence += 0.05;
+      if (hoursRemaining < 6) confidence += 0.15;
+      else if (hoursRemaining < 24) confidence += 0.10;
+      else if (hoursRemaining < 72) confidence += 0.07;
+      else if (hoursRemaining < 168) confidence += 0.05;
+      else if (hoursRemaining < 720) confidence += 0.02;
       if (market.volume > 50000) confidence += 0.05;
       if (market.liquidity > 10000) confidence += 0.05;
       if (bbo.spread < 0.03) confidence += 0.05;
@@ -234,17 +245,21 @@ export class InefficiencyDetector {
 
     // Check NO token (if YES is very low, NO is likely to resolve to 1)
     const noPrice = 1 - yesPrice;
-    if (noPrice >= 0.82 && noPrice <= 0.96) {
+    if (noPrice >= minPrice && noPrice <= 0.96) {
       const expectedProfit = (1.0 - noPrice) * 100;
       const divergence = expectedProfit;
 
       if (divergence < config.strategy.minDivergence) return null;
 
-      let confidence = 0.55;
+      let confidence = 0.50;
       if (noPrice >= 0.90) confidence += 0.15;
       else if (noPrice >= 0.85) confidence += 0.10;
-      if (hoursRemaining < 24) confidence += 0.10;
-      if (hoursRemaining < 6) confidence += 0.10;
+      else if (noPrice >= 0.80) confidence += 0.05;
+      if (hoursRemaining < 6) confidence += 0.15;
+      else if (hoursRemaining < 24) confidence += 0.10;
+      else if (hoursRemaining < 72) confidence += 0.07;
+      else if (hoursRemaining < 168) confidence += 0.05;
+      else if (hoursRemaining < 720) confidence += 0.02;
       if (market.volume > 50000) confidence += 0.05;
       if (market.liquidity > 10000) confidence += 0.05;
 
@@ -329,8 +344,8 @@ export class InefficiencyDetector {
   }
 
   /**
-   * Detect extreme convergence: tokens at 0.93+ or 0.07- within 12h of expiry
-   * These almost always resolve to their extreme → free money
+   * Detect extreme convergence: tokens at 0.90+ or 0.10- within 30 days of expiry
+   * Closer to expiry = higher confidence
    */
   private detectExtremeConvergence(
     market: PolymarketMarket,
@@ -340,16 +355,18 @@ export class InefficiencyDetector {
     bbo: { bid: number; ask: number; spread: number },
     hoursRemaining: number
   ): TradeSignal | null {
-    if (hoursRemaining > 12 || hoursRemaining < 0.5) return null;
+    if (hoursRemaining > 720 || hoursRemaining < 0.5) return null;
 
-    // YES at 0.93+ with <12h → almost certainly resolves YES
-    if (yesPrice >= 0.93 && yesPrice <= 0.98) {
+    // YES at 0.90+ → likely resolves YES
+    if (yesPrice >= 0.90 && yesPrice <= 0.98) {
       const divergence = (1.0 - yesPrice) * 100;
       if (divergence < config.strategy.minDivergence) return null;
 
-      let confidence = 0.75;
+      let confidence = 0.65;
       if (yesPrice >= 0.95) confidence += 0.10;
-      if (hoursRemaining < 3) confidence += 0.05;
+      if (hoursRemaining < 6) confidence += 0.10;
+      else if (hoursRemaining < 24) confidence += 0.07;
+      else if (hoursRemaining < 168) confidence += 0.03;
       if (market.liquidity > 5000) confidence += 0.05;
       confidence = Math.min(0.92, confidence);
 
@@ -371,15 +388,17 @@ export class InefficiencyDetector {
       };
     }
 
-    // YES at 0.02-0.07 with <12h → almost certainly resolves NO
-    if (yesPrice >= 0.02 && yesPrice <= 0.07) {
+    // YES at 0.02-0.10 → likely resolves NO (buy NO token)
+    if (yesPrice >= 0.02 && yesPrice <= 0.10) {
       const noActualPrice = 1 - yesPrice;
       const divergence = (1.0 - noActualPrice) * 100;
       if (divergence < config.strategy.minDivergence) return null;
 
-      let confidence = 0.75;
+      let confidence = 0.65;
       if (yesPrice <= 0.05) confidence += 0.10;
-      if (hoursRemaining < 3) confidence += 0.05;
+      if (hoursRemaining < 6) confidence += 0.10;
+      else if (hoursRemaining < 24) confidence += 0.07;
+      else if (hoursRemaining < 168) confidence += 0.03;
       if (market.liquidity > 5000) confidence += 0.05;
       confidence = Math.min(0.92, confidence);
 
