@@ -39,49 +39,37 @@ export class PolymarketClient {
   }
 
   /**
-   * Fetch ALL active crypto prediction markets (BTC, ETH, SOL, BNB, etc.)
+   * Fetch ALL active prediction markets (crypto + sports + politics + events)
+   * Trades ANY binary market where YES/NO token is mispriced vs probability
    */
   async fetchBTCMarkets(): Promise<PolymarketMarket[]> {
     try {
-      // Fetch all crypto-tagged active markets
-      const response = await this.httpClient.get('/markets', {
-        params: {
-          active: true,
-          closed: false,
-          tag: 'crypto',
-          limit: 100,
-        },
-      });
+      // Fetch ALL active markets (no tag filter)
+      const responses = await Promise.all([
+        this.httpClient.get('/markets', { params: { active: true, closed: false, limit: 100, offset: 0 } }),
+        this.httpClient.get('/markets', { params: { active: true, closed: false, limit: 100, offset: 100 } }),
+      ]);
 
-      const allMarkets = response.data || [];
+      let allMarkets: any[] = [];
+      for (const response of responses) {
+        allMarkets = allMarkets.concat(response.data || []);
+      }
 
-      // Crypto keywords to match - ALL major crypto assets
-      const cryptoKeywords = [
-        'bitcoin', 'btc',
-        'ethereum', 'eth', 'ether',
-        'solana', 'sol',
-        'bnb', 'binance coin',
-        'xrp', 'ripple',
-        'dogecoin', 'doge',
-        'cardano', 'ada',
-        'avalanche', 'avax',
-        'polkadot', 'dot',
-        'polygon', 'matic',
-        'chainlink', 'link',
-        'litecoin', 'ltc',
-        'crypto', 'cryptocurrency',
-      ];
+      // Filter: only markets with tokens, liquidity > $500, and end date
+      this.btcMarkets = allMarkets
+        .filter((market: any) => {
+          const tokens = market.tokens || [];
+          const liquidity = parseFloat(market.liquidity || '0');
+          const hasEndDate = !!(market.end_date_iso || market.endDate);
+          const hasTokens = tokens.length >= 2;
+          return hasTokens && liquidity >= 500 && hasEndDate;
+        })
+        .map((m: any) => this.normalizeMarket(m));
 
-      // Filter for any crypto price prediction market
-      this.btcMarkets = allMarkets.filter((market: any) => {
-        const q = (market.question || '').toLowerCase();
-        return cryptoKeywords.some(keyword => q.includes(keyword));
-      }).map((m: any) => this.normalizeMarket(m));
-
-      logger.info(`Found ${this.btcMarkets.length} active CRYPTO markets on Polymarket`);
+      logger.info(`Found ${this.btcMarkets.length} active markets on Polymarket (ALL categories)`);
       return this.btcMarkets;
     } catch (error: any) {
-      logger.error(`Failed to fetch crypto markets: ${error.message}`);
+      logger.error(`Failed to fetch markets: ${error.message}`);
       return this.btcMarkets; // return cached
     }
   }
