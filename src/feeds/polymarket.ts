@@ -44,25 +44,45 @@ export class PolymarketClient {
    */
   async fetchBTCMarkets(): Promise<PolymarketMarket[]> {
     try {
-      // Fetch ALL active markets (no tag filter)
-      const responses = await Promise.all([
-        this.httpClient.get('/markets', { params: { active: true, closed: false, limit: 100, offset: 0 } }),
-        this.httpClient.get('/markets', { params: { active: true, closed: false, limit: 100, offset: 100 } }),
-      ]);
+      // Fetch markets from multiple categories to maximize coverage
+      const tags = ['crypto', 'sports', 'politics', 'pop-culture', 'science', 'business'];
+      const fetchPromises = tags.map(tag =>
+        this.httpClient.get('/markets', {
+          params: { active: true, closed: false, tag, limit: 50 },
+        }).catch(() => ({ data: [] }))
+      );
 
-      let allMarkets: any[] = [];
+      // Also fetch without tag (general markets)
+      fetchPromises.push(
+        this.httpClient.get('/markets', {
+          params: { active: true, closed: false, limit: 100 },
+        }).catch(() => ({ data: [] }))
+      );
+
+      const responses = await Promise.all(fetchPromises);
+
+      // Combine all markets and deduplicate by id
+      const marketMap = new Map<string, any>();
       for (const response of responses) {
-        allMarkets = allMarkets.concat(response.data || []);
+        const markets = response.data || [];
+        for (const market of markets) {
+          const id = market.id || market.condition_id;
+          if (id && !marketMap.has(id)) {
+            marketMap.set(id, market);
+          }
+        }
       }
 
-      // Filter: only markets with tokens, liquidity > $500, and end date
+      const allMarkets = Array.from(marketMap.values());
+
+      // Filter: only markets with tokens, liquidity > $100, and end date
       this.btcMarkets = allMarkets
         .filter((market: any) => {
           const tokens = market.tokens || [];
           const liquidity = parseFloat(market.liquidity || '0');
           const hasEndDate = !!(market.end_date_iso || market.endDate);
           const hasTokens = tokens.length >= 2;
-          return hasTokens && liquidity >= 500 && hasEndDate;
+          return hasTokens && liquidity >= 100 && hasEndDate;
         })
         .map((m: any) => this.normalizeMarket(m));
 
